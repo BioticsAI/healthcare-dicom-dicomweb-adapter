@@ -48,6 +48,7 @@ import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.ArrayList;
 import org.dcm4che3.net.Device;
 import org.dcm4che3.net.service.BasicCEchoSCP;
 import org.dcm4che3.net.service.DicomServiceRegistry;
@@ -69,6 +70,12 @@ public class ImportAdapter {
     jCommander.parse(args);
 
     AetDICOMMap aetDicomMap = new AetDICOMMap(flags.aetDicomMapInline, flags.aetDicomMapPath);
+    List<Aet> aets = new ArrayList<Aet>();
+    if (flags.aetDicomMapInline != null || flags.aetDicomMapPath != null) {
+      aets = aetDicomMap.getAets();
+    } else {
+      aets.add(new Aet(flags.dimseAET, flags.dicomwebAddress, flags.dimsePort));
+    }
 
     if (flags.help) {
       jCommander.usage();
@@ -95,9 +102,7 @@ public class ImportAdapter {
       MonitoringService.disable();
     }
 
-    for (Aet aet : aetDicomMap.getAets()) {
-      System.out.println(aet);
-
+    for (Aet aet : aets) {
       String dicomwebAddress = DicomWebValidation.validatePath(aet.getDicom(),
           DicomWebValidation.DICOMWEB_ROOT_VALIDATION);
       // Dicom service handlers.
