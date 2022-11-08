@@ -29,6 +29,7 @@ import com.google.cloud.healthcare.deid.redactor.DicomRedactor;
 import com.google.cloud.healthcare.deid.redactor.protos.DicomConfigProtos;
 import com.google.cloud.healthcare.deid.redactor.protos.DicomConfigProtos.DicomConfig;
 import com.google.cloud.healthcare.deid.redactor.protos.DicomConfigProtos.DicomConfig.TagFilterProfile;
+import com.google.cloud.healthcare.imaging.dicomadapter.AetDICOMMap.Aet;
 import com.google.cloud.healthcare.imaging.dicomadapter.cmove.CMoveSenderFactory;
 import com.google.cloud.healthcare.imaging.dicomadapter.cstore.backup.BackupUploadService;
 import com.google.cloud.healthcare.imaging.dicomadapter.cstore.backup.DelayCalculator;
@@ -47,6 +48,7 @@ import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.ArrayList;
 import org.dcm4che3.net.Device;
 import org.dcm4che3.net.service.BasicCEchoSCP;
 import org.dcm4che3.net.service.DicomServiceRegistry;
@@ -67,9 +69,15 @@ public class ImportAdapter {
     JCommander jCommander = new JCommander(flags);
     jCommander.parse(args);
 
-    String dicomwebAddress = DicomWebValidation.validatePath(flags.dicomwebAddress, DicomWebValidation.DICOMWEB_ROOT_VALIDATION);
+    AetDICOMMap aetDicomMap = new AetDICOMMap(flags.aetDicomMapInline, flags.aetDicomMapPath);
+    List<Aet> aets = new ArrayList<Aet>();
+    if (flags.aetDicomMapInline != null || flags.aetDicomMapPath != null) {
+      aets = aetDicomMap.getAets();
+    } else {
+      aets.add(new Aet(flags.dimseAET, flags.dicomwebAddress, flags.dimsePort));
+    }
 
-    if(flags.help){
+    if (flags.help) {
       jCommander.usage();
       return;
     }
@@ -83,8 +91,8 @@ public class ImportAdapter {
       credentials = credentials.createScoped(Arrays.asList(flags.oauthScopes.split(",")));
     }
 
-    HttpRequestFactory requestFactory =
-        new NetHttpTransport().createRequestFactory(new HttpCredentialsAdapter(credentials));
+    HttpRequestFactory requestFactory = new NetHttpTransport()
+        .createRequestFactory(new HttpCredentialsAdapter(credentials));
 
     // Initialize Monitoring
     if (!flags.monitoringProjectId.isEmpty()) {
@@ -94,60 +102,64 @@ public class ImportAdapter {
       MonitoringService.disable();
     }
 
-    // Dicom service handlers.
-    DicomServiceRegistry serviceRegistry = new DicomServiceRegistry();
+    for (Aet aet : aets) {
+      String dicomwebAddress = DicomWebValidation.validatePath(aet.getDicom(),
+          DicomWebValidation.DICOMWEB_ROOT_VALIDATION);
+      // Dicom service handlers.
+      DicomServiceRegistry serviceRegistry = new DicomServiceRegistry();
 
-    // Handle C-ECHO (all nodes which accept associations must support this).
-    serviceRegistry.addDicomService(new BasicCEchoSCP());
+      // Handle C-ECHO (all nodes which accept associations must support this).
+      serviceRegistry.addDicomService(new BasicCEchoSCP());
 
-    // Handle C-STORE
-    String cstoreDicomwebAddr = dicomwebAddress;
-    String cstoreDicomwebStowPath = STUDIES;
-    if (cstoreDicomwebAddr.length() == 0) {
-      cstoreDicomwebAddr = flags.dicomwebAddr;
-      cstoreDicomwebStowPath = flags.dicomwebStowPath;
+      // Handle C-STORE
+      String cstoreDicomwebAddr = dicomwebAddress;
+      String cstoreDicomwebStowPath = STUDIES;
+      if (cstoreDicomwebAddr.length() == 0) {
+        cstoreDicomwebAddr = flags.dicomwebAddr;
+        cstoreDicomwebStowPath = flags.dicomwebStowPath;
+      }
+
+      String cstoreSubAet = flags.dimseCmoveAET.equals("") ? aet.getName() : flags.dimseCmoveAET;
+      if (cstoreSubAet.isBlank()) {
+        throw new IllegalArgumentException("--dimse_aet flag must be set.");
+      }
+
+      IDicomWebClient defaultCstoreDicomWebClient = configureDefaultDicomWebClient(
+          requestFactory, cstoreDicomwebAddr, cstoreDicomwebStowPath, credentials, flags);
+
+      DicomRedactor redactor = configureRedactor(flags);
+
+      BackupUploadService backupUploadService = configureBackupUploadService(flags, credentials);
+
+      IDestinationClientFactory destinationClientFactory = configureDestinationClientFactory(
+          defaultCstoreDicomWebClient, credentials, flags, backupUploadService != null);
+
+      MultipleDestinationUploadService multipleDestinationSendService = configureMultipleDestinationUploadService(
+          flags, cstoreSubAet, backupUploadService);
+
+      CStoreService cStoreService = new CStoreService(destinationClientFactory, redactor, flags.transcodeToSyntax,
+          multipleDestinationSendService);
+      serviceRegistry.addDicomService(cStoreService);
+
+      // Handle C-FIND
+      IDicomWebClient dicomWebClient = new DicomWebClient(requestFactory, dicomwebAddress, STUDIES);
+      CFindService cFindService = new CFindService(dicomWebClient, flags);
+      serviceRegistry.addDicomService(cFindService);
+
+      // Handle C-MOVE
+      CMoveSenderFactory cMoveSenderFactory = new CMoveSenderFactory(cstoreSubAet, dicomWebClient);
+      AetDictionary aetDict = new AetDictionary(flags.aetDictionaryInline, flags.aetDictionaryPath);
+      CMoveService cMoveService = new CMoveService(dicomWebClient, aetDict, cMoveSenderFactory);
+      serviceRegistry.addDicomService(cMoveService);
+
+      // Handle Storage Commitment N-ACTION
+      serviceRegistry.addDicomService(new StorageCommitmentService(dicomWebClient, aetDict));
+
+      // Start DICOM server
+      Device device = DeviceUtil.createServerDevice(aet.getName(), aet.getPort(), serviceRegistry);
+      device.bindConnections();
     }
 
-    String cstoreSubAet = flags.dimseCmoveAET.equals("") ? flags.dimseAET : flags.dimseCmoveAET;
-    if (cstoreSubAet.isBlank()) {
-      throw new IllegalArgumentException("--dimse_aet flag must be set.");
-    }
-
-    IDicomWebClient defaultCstoreDicomWebClient = configureDefaultDicomWebClient(
-        requestFactory, cstoreDicomwebAddr, cstoreDicomwebStowPath, credentials, flags);
-
-    DicomRedactor redactor = configureRedactor(flags);
-
-    BackupUploadService backupUploadService = configureBackupUploadService(flags, credentials);
-
-    IDestinationClientFactory destinationClientFactory = configureDestinationClientFactory(
-      defaultCstoreDicomWebClient, credentials, flags, backupUploadService != null);
-
-    MultipleDestinationUploadService multipleDestinationSendService = configureMultipleDestinationUploadService(
-        flags, cstoreSubAet, backupUploadService);
-
-    CStoreService cStoreService =
-        new CStoreService(destinationClientFactory, redactor, flags.transcodeToSyntax, multipleDestinationSendService);
-    serviceRegistry.addDicomService(cStoreService);
-
-    // Handle C-FIND
-    IDicomWebClient dicomWebClient =
-        new DicomWebClient(requestFactory, dicomwebAddress, STUDIES);
-    CFindService cFindService = new CFindService(dicomWebClient, flags);
-    serviceRegistry.addDicomService(cFindService);
-
-    // Handle C-MOVE
-    CMoveSenderFactory cMoveSenderFactory = new CMoveSenderFactory(cstoreSubAet, dicomWebClient);
-    AetDictionary aetDict = new AetDictionary(flags.aetDictionaryInline, flags.aetDictionaryPath);
-    CMoveService cMoveService = new CMoveService(dicomWebClient, aetDict, cMoveSenderFactory);
-    serviceRegistry.addDicomService(cMoveService);
-
-    // Handle Storage Commitment N-ACTION
-    serviceRegistry.addDicomService(new StorageCommitmentService(dicomWebClient, aetDict));
-
-    // Start DICOM server
-    Device device = DeviceUtil.createServerDevice(flags.dimseAET, flags.dimsePort, serviceRegistry);
-    device.bindConnections();
   }
 
   private static IDicomWebClient configureDefaultDicomWebClient(
