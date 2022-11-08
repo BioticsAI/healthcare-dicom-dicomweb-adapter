@@ -170,23 +170,6 @@ public class ImportAdapter {
       Flags flags) {
     IDicomWebClient defaultCstoreDicomWebClient;
     if (flags.useHttp2ForStow) {
-      defaultCstoreDicomWebClient = new DicomWebClientJetty(
-          credentials, StringUtil.joinPath(cstoreDicomwebAddr, cstoreDicomwebStowPath), flags.useStowOverwrite);
-    } else {
-      defaultCstoreDicomWebClient = new DicomWebClient(
-          requestFactory, cstoreDicomwebAddr, cstoreDicomwebStowPath, flags.useStowOverwrite);
-    }
-    return defaultCstoreDicomWebClient;
-  }
-
-  private static IDicomWebClient configureDefaultDicomWebClient(
-      HttpRequestFactory requestFactory,
-      String cstoreDicomwebAddr,
-      String cstoreDicomwebStowPath,
-      GoogleCredentials credentials,
-      Flags flags) {
-    IDicomWebClient defaultCstoreDicomWebClient;
-    if (flags.useHttp2ForStow) {
       defaultCstoreDicomWebClient =
           new DicomWebClientJetty(
               credentials, StringUtil.joinPath(cstoreDicomwebAddr, cstoreDicomwebStowPath), flags.useStowOverwrite);
